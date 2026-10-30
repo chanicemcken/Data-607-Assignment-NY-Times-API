@@ -1,0 +1,39 @@
+---
+title: "New York Times API: Approach Deliverable"
+author: "Chanice Mckenzie"
+format:
+  html:
+    toc: true
+    code-fold: true
+---
+
+## Introduction
+
+**Which hardcover fiction books appear most frequently on the New York Times bestseller list during a selected period, and what might their repeated appearances suggest about staying power?**
+
+Rather than focusing only on the books ranked highest in a single week, I plan to examine whether certain titles continue to appear on the bestseller list over time. This will help distinguish a brief appearance from sustained popularity, at least as measured by the New York Times list.
+
+I plan to use the **New York Times Books API**, specifically the bestseller-list history endpoint (`/svc/books/v3/lists/best-sellers/history.json`). This endpoint provides historical bestseller information that can be filtered by attributes such as title, author, or publisher. I will review the available fields and API documentation before finalizing the analysis, because historical records may not provide a complete week-by-week ranking for the exact period I want to study.
+
+If the history endpoint does not support a reliable time-based comparison, I will narrow the question to the information it actually provides or use the Books API's dated bestseller-list endpoint (`/svc/books/v3/lists/{date}/hardcover-fiction.json`) to compare selected weekly snapshots. I will clearly identify the endpoint ultimately used.
+
+## Planned Approach
+
+First, I will register for a New York Times Developer account and obtain an API key. I will store the key in an environment variable rather than including it in the Quarto document or GitHub repository.
+
+Next, I will review the Books API documentation and make a small test request to understand the structure of the JSON response. I will identify the fields needed for the question, such as book title, author, list information, dates, and any available indicators of time spent on the list. I will then transform the nested JSON into a tidy R data frame with consistent column names and one clearly defined observation per row.
+
+After checking the coverage of the returned records, I will compare titles using an appropriate measure supported by the data—for example, the number of selected dated lists on which a title appears. I will avoid interpreting the API results as total book sales, since bestseller-list appearances are not equivalent to sales counts.
+
+## Anticipated Data Challenges
+
+The main challenge will be **matching the available API data to the research question**. Historical bestseller information may not represent every weekly appearance in a convenient format, and some endpoints may require separate requests for different dates. I will check whether the requested period is sufficiently covered before drawing conclusions.
+
+The JSON response may also contain nested fields, missing values, and repeated book records. I will need to decide how to identify the same title across records, especially when titles have different editions or similar names. I will document any records excluded or fields standardized during cleaning.
+
+Finally, API request limits and authentication errors may interrupt retrieval. I plan to test requests in small batches, handle unsuccessful responses clearly, and retain a local data snapshot for reproducibility once retrieval succeeds.
+
+
+## Reference
+
+New York Times Developer Network: https://developer.nytimes.com/docs/books-product/1/overview
