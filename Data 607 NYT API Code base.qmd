@@ -1,0 +1,252 @@
+---
+title: "DATA 607 — New York Times API: Code Base Deliverable"
+author: "Chanice McKenzie"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Introduction
+
+[The New York Times Books API](https://developer.nytimes.com/docs/books-product/1/overview) provides lists of bestselling books, including the weekly Hardcover Fiction rankings. This analysis asks: **Which hardcover fiction titles appeared most consistently across four selected September 2025 bestseller-list snapshots, and how did their ranks compare?** Rather than assuming that a book's rank on one date measures lasting popularity, I count repeated appearances across the selected published lists.
+
+## API selection and change from the Approach deliverable
+
+My original [Approach deliverable](https://github.com/chanicemcken/Data-607-Assignment-NY-Times-API) considered the bestseller history endpoint, but noted that it might not provide a complete week-by-week sequence for a chosen period. For the Code Base, I selected the **Books API — Best Sellers List by Date**, because individual snapshots allow me to compare the same list over four requested weeks without interpreting book-history search results as a complete time series.
+
+- **Endpoint:** `GET https://api.nytimes.com/svc/books/v3/lists/{date}/hardcover-fiction.json`
+- **Description:** Returns rankings and book details for the *Hardcover Fiction* bestseller list associated with the requested publication date.
+- **Path parameters:** `{date}` = a requested list date in `YYYY-MM-DD` format; list name = `hardcover-fiction`.
+- **Query parameter:** `api-key`, read from the `NYT_API_KEY` environment variable, **never written in this document or committed to GitHub**.
+- **Requested dates:** September 7, 14, 21, and 28, 2025. These are four consecutive Sunday dates; the returned `published_date` is retained and verified instead of assuming the API returned exactly the date entered.
+- **Unit of observation:** One book on one returned published bestseller list.
+
+The main outcome is **the number of distinct sampled list dates on which a title appears** (1–4). This is not an estimate of copies sold or the total number of weeks on the NYT list. The API's `weeks_on_list` field is included only as context.
+
+## Environment and API authentication
+
+The code requires the R packages `httr2`, `jsonlite`, `dplyr`, `tibble`, `ggplot2`, and `knitr`, plus internet access and an active NYT Books API key. In RStudio, I willset the environment variable before rendering.
+
+```r
+# Execute this in the R console, replacing the placeholder:
+# Sys.setenv(NYT_API_KEY = "YOUR_OWN_KEY")
+
+```
+No private API key or local dataset is embedded in this project. If the variable is missing, the document stops with a clear explanation instead of sending an unauthenticated request.
+
+```{r setup}
+library(httr2)
+library(jsonlite)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(knitr)
+
+api_key <- trimws(Sys.getenv("NYT_API_KEY", unset = ""))
+if (!nzchar(api_key)) {
+  stop(
+    "NYT_API_KEY is not set. Create an NYT developer API key and set ",
+    "Sys.setenv(NYT_API_KEY = 'your_key') in your R session ",
+    "or use a private ~/.Renviron file before rendering.",
+    call. = FALSE
+  )
+}
+
+requested_dates <- as.Date(c(
+  "2025-09-07", "2025-09-14", "2025-09-21", "2025-09-28"
+))
+list_slug <- "hardcover-fiction"
+```
+
+## Retrieve and parse the JSON response
+
+Each request uses HTTPS and sends the API key as the required query parameter. I use `httr2` to make the request, `jsonlite` to parse the response, and record the returned publication date. An error handler reports the request date without printing the secret key; a short pause between requests avoids unnecessary rapid calls.
+
+```{r request-and-parse}
+fetch_hardcover_list <- function(requested_date) {
+  date_text <- format(requested_date, "%Y-%m-%d")
+  endpoint <- paste0(
+    "https://api.nytimes.com/svc/books/v3/lists/",
+    date_text, "/", list_slug, ".json"
+  )
+  req <- request(endpoint) |>
+    req_url_query(`api-key` = api_key) |>
+    req_timeout(30)
+
+  response <- tryCatch(
+    req_perform(req),
+    error = function(e) {
+      stop(
+        "NYT request failed for ", date_text,
+        ". Verify the API key, NYT Books API access, internet connection, ",
+        "and rate limits. (Credentials omitted from this message.)",
+        call. = FALSE
+      )
+    }
+  )
+  payload <- fromJSON(resp_body_string(response), simplifyVector = FALSE)
+  if (!identical(payload$status, "OK") || is.null(payload$results$books)) {
+    stop("Unexpected NYT JSON structure for requested date ", date_text,
+         call. = FALSE)
+  }
+  list(requested_date = requested_date, results = payload$results)
+}
+
+responses <- lapply(requested_dates, function(d) {
+  result <- fetch_hardcover_list(d)
+  Sys.sleep(0.5)
+  result
+})
+
+# Show metadata only: never print the request object or API key.
+request_log <- bind_rows(lapply(responses, function(x) {
+  tibble(
+    requested_date = x$requested_date,
+    published_date = as.Date(x$results$published_date),
+    bestsellers_date = as.Date(x$results$bestsellers_date),
+    books_returned = length(x$results$books)
+  )
+}))
+kable(request_log, caption = "Requested dates and actual list dates returned by NYT")
+```
+
+## Clean nested JSON into a tidy data frame
+
+The API provides a nested `results` object containing a `books` array. I flatten **only the fields needed for this analysis**: `title`, `author`, `rank`, `weeks_on_list`, `primary_isbn13`, and the list dates. I trim and standardize title and author text, convert blank text to missing, and keep missing ISBNs as `NA` instead of inventing identifiers. One row represents one book on one published list date.
+
+```{r tidy-books}
+# Safely extract optional scalar values from each nested book object.
+text_field <- function(x, name) {
+  val <- x[[name]]
+  if (is.null(val) || length(val) == 0) return(NA_character_)
+  val <- trimws(as.character(val[[1]]))
+  if (!nzchar(val)) NA_character_ else val
+}
+number_field <- function(x, name) {
+  val <- x[[name]]
+  if (is.null(val) || length(val) == 0) return(NA_integer_)
+  suppressWarnings(as.integer(val[[1]]))
+}
+
+books <- bind_rows(lapply(responses, function(response_item) {
+  result <- response_item$results
+  bind_rows(lapply(result$books, function(book) {
+    tibble(
+      requested_date = response_item$requested_date,
+      published_date = as.Date(result$published_date),
+      title = text_field(book, "title"),
+      author = text_field(book, "author"),
+      rank = number_field(book, "rank"),
+      weeks_on_list = number_field(book, "weeks_on_list"),
+      primary_isbn13 = text_field(book, "primary_isbn13")
+    )
+  }))
+})) |>
+  mutate(
+    title = toupper(trimws(title)),
+    author = trimws(author),
+    # Compare title + author, rather than ISBN, to avoid splitting editions.
+    book_id = if_else(!is.na(title) & !is.na(author),
+                      paste(title, toupper(author), sep = " | "),
+                      NA_character_)
+  ) |>
+  arrange(published_date, rank)
+
+# Validation and completeness checks.
+stopifnot(nrow(books) > 0, all(!is.na(books$published_date)))
+stopifnot(all(books$rank >= 1, na.rm = TRUE))
+stopifnot(!anyDuplicated(books[c("published_date", "rank")]))
+
+quality_summary <- tibble(
+  total_book_list_rows = nrow(books),
+  unique_published_dates = n_distinct(books$published_date),
+  missing_titles = sum(is.na(books$title)),
+  missing_authors = sum(is.na(books$author)),
+  missing_isbn13 = sum(is.na(books$primary_isbn13))
+)
+kable(quality_summary, caption = "Data-quality summary")
+kable(head(select(books, published_date, rank, title, author,
+                  weeks_on_list, primary_isbn13), 10),
+      caption = "Sample of the tidy book-by-list data")
+```
+
+Missing titles or authors are kept in the audit table but excluded from title-level grouping because their identity cannot be established reliably. Titles are matched by **standardized title and author**; different books with identical titles and authors would be combined, so this approximation is documented as a limitation. The same book listed multiple times on one date would count only once in the persistence measure.
+
+## Analysis: Which books recur across the sampled lists?
+
+For each identifiable book, I count distinct `published_date` values and summarize the highest rank (smaller rank is better), average rank, and largest `weeks_on_list` value observed during the sample. Ranking by appearances provides a directly observable answer to the research question.
+
+```{r analyze}
+valid_books <- books |> filter(!is.na(book_id))
+
+appearance_summary <- valid_books |>
+  group_by(book_id, title, author) |>
+  summarise(
+    sampled_list_appearances = n_distinct(published_date),
+    best_rank = min(rank, na.rm = TRUE),
+    mean_rank = mean(rank, na.rm = TRUE),
+    largest_reported_weeks_on_list = if (all(is.na(weeks_on_list)))
+      NA_integer_ else max(weeks_on_list, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(sampled_list_appearances), mean_rank, title)
+
+kable(
+  head(select(appearance_summary, title, author,
+              sampled_list_appearances, best_rank, mean_rank,
+              largest_reported_weeks_on_list), 10),
+  digits = 1,
+  caption = "Ten titles with the most appearances in the selected lists"
+)
+
+cat("Identifiable titles:", nrow(appearance_summary), "\n")
+cat("Distinct published list dates:", n_distinct(books$published_date), "\n")
+cat("Titles appearing on every sampled list:",
+    sum(appearance_summary$sampled_list_appearances ==
+          n_distinct(books$published_date)), "\n")
+```
+
+### Visualization of repeated appearances
+
+The chart shows the ten leading titles, ordered by the number of distinct sampled lists on which they appeared. When several books tie on appearances, average rank determines their display order; this is descriptive and does not establish sales volume.
+```{r}
+#| label: plot-top-books
+#| fig-width: 9
+#| fig-height: 5
+
+top_books <- head(appearance_summary, 10)
+top_books$display_label <- paste0(top_books$title, " — ", top_books$author)
+
+ggplot(top_books,
+       aes(x = reorder(display_label, sampled_list_appearances),
+           y = sampled_list_appearances)) +
+  geom_col(fill = "#287d82", width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(breaks = seq_len(n_distinct(books$published_date))) +
+  labs(
+    title = "Hardcover Fiction Titles with the Most Sampled List Appearances",
+    subtitle = "Four requested September 2025 snapshots; ties ordered by average rank",
+    x = NULL,
+    y = "Distinct sampled published lists"
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+## Conclusions 
+
+This study compares repeated appearances on selected NYT Hardcover Fiction bestseller lists rather than relying on a single weekly rank. The summary table identifies which titles were most consistently present across the **actual published list dates returned**, and the rank columns show whether those recurring books also tended to place higher. These conclusions are limited to the sampled lists; they are **not** claims about total book sales, consumer preferences in general, or all weeks in 2025.
+
+
+## Reproducibility and references
+
+**To reproduce:** Install the packages listed above, obtain a New York Times Books API key, set `NYT_API_KEY` in the R process environment, and render this single `.qmd` file using Quarto. All book records are fetched from the public NYT endpoint using HTTPS; there are **no local data-file paths or private datasets**. The API key must stay out of Git and out of screenshots. The report intentionally shows an informative error if the key is missing or the API cannot be reached; no live result was fabricated during preparation of this code.
+
+- [NYT Developer — Books API overview](https://developer.nytimes.com/docs/books-product/1/overview)
+- [NYT Books API specification (dated list endpoint and response fields)](https://github.com/nytimes/public_api_specs/blob/master/books_api/books_api.yaml)
+- [NYT Books API documentation](https://github.com/nytimes/public_api_specs/blob/master/books_api/books_api.md)
